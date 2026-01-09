@@ -1,0 +1,1 @@
+To reset intellisense after fullclean and removing build folder -> idf.py -D CMAKE_EXPORT_COMPILE_COMMANDS=ON reconfigure

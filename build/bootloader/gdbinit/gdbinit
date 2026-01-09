@@ -1,0 +1,2 @@
+source /home/chris/projects/guition_panel/build/bootloader/gdbinit/symbols
+source /home/chris/projects/guition_panel/build/bootloader/gdbinit/connect
