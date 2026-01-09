@@ -1,5 +1,6 @@
-./sdkconfig
-./build/
-./sdkconfig.ci
-./sdkconfig.old
-./.vscode/
+
+sdkconfig
+sdkconfig.ci
+sdkconfig.old
+/build/
+/.vscode/
