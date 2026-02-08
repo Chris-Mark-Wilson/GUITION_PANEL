@@ -2,108 +2,102 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_err.h"
+
 #include "driver/gpio.h"
-#include "driver/ledc.h"
+#include "driver/i2c_master.h"
 
-static const char *TAG = "BL_DISCOVERY";
+// If you don't have these components in your project yet,
+// comment the #includes and hard-code the addresses instead.
+#include "esp_lcd_touch_gsl3680.h"
+#include "esp_lcd_touch_gt911.h"
+#include "esp_lcd_touch_ft5x06.h"
 
-/*
-  Candidate GPIOs:
-  - We try a broad but reasonable range.
-  - If nothing works, we can widen it.
-*/
-static const int candidates[] = {
-   23
-};
+static const char *TAG = "TP_PROBE";
 
-static void bl_drive_gpio(int gpio, int level)
+// From pins_config.h
+#define TP_I2C_SDA   7
+#define TP_I2C_SCL   8
+#define TP_RST       22
+#define TP_INT       21
+
+static void touch_reset_pulse(void)
 {
     gpio_config_t io = {
-        .pin_bit_mask = 1ULL << gpio,
+        .pin_bit_mask = 1ULL << TP_RST,
         .mode = GPIO_MODE_OUTPUT,
-        .pull_down_en = 0,
         .pull_up_en = 0,
-        .intr_type = GPIO_INTR_DISABLE
+        .pull_down_en = 0,
+        .intr_type = GPIO_INTR_DISABLE,
     };
-    // Some GPIO numbers may be invalid on a given chip/package; ignore errors.
-    if (gpio_config(&io) != ESP_OK) return;
-    gpio_set_level(gpio, level);
+    ESP_ERROR_CHECK(gpio_config(&io));
+
+    // Active-low reset, typical for these chips
+    gpio_set_level(TP_RST, 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(TP_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(100));
 }
 
-static void bl_pwm_gpio(int gpio, int percent)
+static void touch_int_input(void)
 {
-    if (percent < 0) percent = 0;
-    if (percent > 100) percent = 100;
-
-    // LEDC timer
-    ledc_timer_config_t t = {
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .timer_num = LEDC_TIMER_0,
-        .duty_resolution = LEDC_TIMER_10_BIT,
-        .freq_hz = 20000,
-        .clk_cfg = LEDC_AUTO_CLK
+    gpio_config_t io = {
+        .pin_bit_mask = 1ULL << TP_INT,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = 1,  // safe, usually open-drain
+        .pull_down_en = 0,
+        .intr_type = GPIO_INTR_DISABLE,
     };
-    ledc_timer_config(&t);
-
-    // LEDC channel on the GPIO
-    ledc_channel_config_t c = {
-        .gpio_num = gpio,
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel = LEDC_CHANNEL_0,
-        .timer_sel = LEDC_TIMER_0,
-        .duty = 0,
-        .hpoint = 0
-    };
-    if (ledc_channel_config(&c) != ESP_OK) return;
-
-    uint32_t max = (1 << 10) - 1;
-    uint32_t duty = (max * (uint32_t)percent) / 100;
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    ESP_ERROR_CHECK(gpio_config(&io));
 }
 
-static void all_off(void)
+static void probe_touch_addrs(i2c_master_bus_handle_t bus)
 {
-    // best-effort: drive all candidates low (safe after boot)
-    for (int i = 0; i < (int)(sizeof(candidates)/sizeof(candidates[0])); i++) {
-        bl_drive_gpio(candidates[i], 0);
-    }
+    esp_err_t r;
+
+    r = i2c_master_probe(bus, ESP_LCD_TOUCH_IO_I2C_GSL3680_ADDRESS, 100);
+    ESP_LOGI(TAG, "Probe GSL3680 0x%02X: %s",
+             ESP_LCD_TOUCH_IO_I2C_GSL3680_ADDRESS, esp_err_to_name(r));
+
+    r = i2c_master_probe(bus, ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS, 100);
+    ESP_LOGI(TAG, "Probe GT911   0x%02X: %s",
+             ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS, esp_err_to_name(r));
+
+    r = i2c_master_probe(bus, ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP, 100);
+    ESP_LOGI(TAG, "Probe GT911B  0x%02X: %s",
+             ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP, esp_err_to_name(r));
+
+    r = i2c_master_probe(bus, ESP_LCD_TOUCH_IO_I2C_FT5x06_ADDRESS, 100);
+    ESP_LOGI(TAG, "Probe FT5x06  0x%02X: %s",
+             ESP_LCD_TOUCH_IO_I2C_FT5x06_ADDRESS, esp_err_to_name(r));
 }
 
 void app_main(void)
- 
-
- 
 {
+    // Keep the i2c spam down
+    esp_log_level_set("i2c.master", ESP_LOG_WARN);
 
-    ESP_LOGI(TAG, "Backlight discovery starting.");
-    ESP_LOGI(TAG, "Watch the panel. When it lights up, note the GPIO in the log.");
+    ESP_LOGI(TAG, "TP probe starting (SDA=%d SCL=%d RST=%d INT=%d)",
+             TP_I2C_SDA, TP_I2C_SCL, TP_RST, TP_INT);
 
-    vTaskDelay(pdMS_TO_TICKS(500));
-    all_off();
+    touch_reset_pulse();
+    touch_int_input();
 
-    // Phase 1: Digital enable sweep
-    ESP_LOGI(TAG, "PHASE 1: Digital enable sweep (set GPIO high for 1.5s).");
-    for (int i = 0; i < (int)(sizeof(candidates)/sizeof(candidates[0])); i++) {
-        int gpio = candidates[i];
-        ESP_LOGI(TAG, "DIGITAL HIGH: GPIO %d", gpio);
-        bl_drive_gpio(gpio, 1);
-        vTaskDelay(pdMS_TO_TICKS(1500));
-        bl_drive_gpio(gpio, 0);
-        vTaskDelay(pdMS_TO_TICKS(200));
+    i2c_master_bus_handle_t bus = NULL;
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = I2C_NUM_0,              // try port 0 first
+        .sda_io_num = TP_I2C_SDA,
+        .scl_io_num = TP_I2C_SCL,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .intr_priority = 0,
+        .flags.enable_internal_pullup = 0,  // external pull-ups on the board
+    };
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus));
+
+    probe_touch_addrs(bus);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
-
-    // Phase 2: PWM sweep
-    ESP_LOGI(TAG, "PHASE 2: PWM sweep (100%% duty @20kHz for 2s).");
-    for (int i = 0; i < (int)(sizeof(candidates)/sizeof(candidates[0])); i++) {
-        int gpio = candidates[i];
-        ESP_LOGI(TAG, "PWM 100%%: GPIO %d", gpio);
-        bl_pwm_gpio(gpio, 100);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        bl_pwm_gpio(gpio, 0);
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-
-    ESP_LOGW(TAG, "Finished both sweeps. If nothing lit, we likely need a pinout (or BL is via expander).");
-    while (1) vTaskDelay(pdMS_TO_TICKS(1000));
 }
